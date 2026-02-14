@@ -1,0 +1,6 @@
+numpy
+soundcard
+pycaw
+comtypes
+pystray
+Pillow

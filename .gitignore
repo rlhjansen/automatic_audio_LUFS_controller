@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.log
+System Volume Information/
+normalized/
+*.mp3
+*.m4a
+*.wav
+*.flac
+*.ogg
+*.aac
