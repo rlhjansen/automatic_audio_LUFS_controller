@@ -26,14 +26,16 @@ FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-AUDIO_DIR   = Path(r"F:\\")
-OUTPUT_DIR  = AUDIO_DIR / "normalized"
-TARGET_LUFS = -14.0   # Integrated loudness target (Spotify uses -14, YouTube -14)
-TARGET_TP   = -1.0    # True peak ceiling in dBTP
-TARGET_LRA  = 11.0    # Loudness range target
-EXTENSIONS  = {".mp3"}
+AUDIO_DIR = Path(r"F:\\")
+OUTPUT_DIR = AUDIO_DIR / "normalized"
+# Integrated loudness target (Spotify uses -14, YouTube -14)
+TARGET_LUFS = -14.0
+TARGET_TP = -1.0    # True peak ceiling in dBTP
+TARGET_LRA = 11.0    # Loudness range target
+EXTENSIONS = {".mp3"}
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
+
 
 def discover_songs(directory: Path) -> list[Path]:
     """Find all audio files in the directory (non-recursive)."""
@@ -54,7 +56,8 @@ def get_duration(path: Path) -> float:
         FFMPEG, "-i", str(path),
         "-f", "null", "-"
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    result = subprocess.run(cmd, capture_output=True,
+                            text=True, encoding="utf-8", errors="replace")
     match = re.search(r"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)", result.stderr)
     if match:
         h, m, s, cs = match.groups()
@@ -72,7 +75,8 @@ def analyse_loudness(path: Path) -> dict | None:
         "-af", f"loudnorm=I={TARGET_LUFS}:TP={TARGET_TP}:LRA={TARGET_LRA}:print_format=json",
         "-f", "null", "-"
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    result = subprocess.run(cmd, capture_output=True,
+                            text=True, encoding="utf-8", errors="replace")
     stderr = result.stderr
 
     # Extract the JSON block that loudnorm prints
@@ -113,17 +117,19 @@ def print_analysis(results: list[dict], target: float) -> None:
     all_lufs = [r["input_i"] for r in results]
     min_lufs = min(all_lufs)
     max_lufs = max(all_lufs)
-    spread   = max_lufs - min_lufs if max_lufs != min_lufs else 1.0
+    spread = max_lufs - min_lufs if max_lufs != min_lufs else 1.0
 
     print()
     print("=" * 110)
     print("  AUDIO VOLUME ANALYSIS  (EBU R128 / LUFS)")
     print("=" * 110)
-    print(f"\n  {'Song':<50} {'LUFS':>7}  {'Peak':>7}  {'LRA':>5}  {'Dur':>6}  Level")
+    print(
+        f"\n  {'Song':<50} {'LUFS':>7}  {'Peak':>7}  {'LRA':>5}  {'Dur':>6}  Level")
     print("  " + "─" * 106)
 
     for r in results:
-        bar_len = int((r["input_i"] - min_lufs) / spread * bar_width) if spread else bar_width // 2
+        bar_len = int((r["input_i"] - min_lufs) / spread *
+                      bar_width) if spread else bar_width // 2
         bar_len = max(1, bar_len)
         bar = "█" * bar_len
 
@@ -136,8 +142,9 @@ def print_analysis(results: list[dict], target: float) -> None:
             marker = " ▼"
 
         name = r["name"][:48]
-        dur  = format_duration(r["duration_s"])
-        print(f"  {name:<50} {r['input_i']:>+7.1f}  {r['input_tp']:>+7.1f}  {r['input_lra']:>5.1f}  {dur:>6}  {bar}{marker}")
+        dur = format_duration(r["duration_s"])
+        print(
+            f"  {name:<50} {r['input_i']:>+7.1f}  {r['input_tp']:>+7.1f}  {r['input_lra']:>5.1f}  {dur:>6}  {bar}{marker}")
 
     avg_lufs = sum(all_lufs) / len(all_lufs)
     print()
@@ -146,7 +153,8 @@ def print_analysis(results: list[dict], target: float) -> None:
     print(f"    Loudest song:    {max_lufs:+.1f} LUFS")
     print(f"    Quietest song:   {min_lufs:+.1f} LUFS")
     print(f"    Average:         {avg_lufs:+.1f} LUFS")
-    print(f"    Spread:          {spread:.1f} LU   <- this is the volume jump range you currently experience")
+    print(
+        f"    Spread:          {spread:.1f} LU   <- this is the volume jump range you currently experience")
     print(f"    Target:          {target:+.1f} LUFS")
     print(f"    Songs analysed:  {len(results)}")
     print()
@@ -157,7 +165,7 @@ def print_analysis(results: list[dict], target: float) -> None:
 
 
 def normalize_song(info: dict, target_lufs: float, target_tp: float,
-                    target_lra: float, output_dir: Path) -> bool:
+                   target_lra: float, output_dir: Path) -> bool:
     """
     Second pass: normalize a song using the measured loudnorm values.
     Two-pass loudnorm produces better quality than single-pass.
@@ -185,19 +193,21 @@ def normalize_song(info: dict, target_lufs: float, target_tp: float,
         str(out_path),
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    result = subprocess.run(cmd, capture_output=True,
+                            text=True, encoding="utf-8", errors="replace")
     return result.returncode == 0
 
 
 def normalize_all(results: list[dict], target_lufs: float, target_tp: float,
-                   target_lra: float, output_dir: Path) -> None:
+                  target_lra: float, output_dir: Path) -> None:
     """Normalize all songs with a progress display."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 110)
     print("  NORMALIZATION  (two-pass EBU R128)")
     print("=" * 110)
-    print(f"\n  Target:  {target_lufs:+.1f} LUFS  |  True peak ceiling: {target_tp:+.1f} dBTP  |  LRA: {target_lra:.1f} LU")
+    print(
+        f"\n  Target:  {target_lufs:+.1f} LUFS  |  True peak ceiling: {target_tp:+.1f} dBTP  |  LRA: {target_lra:.1f} LU")
     print(f"  Output:  {output_dir}\n")
 
     ok = 0
@@ -206,17 +216,20 @@ def normalize_all(results: list[dict], target_lufs: float, target_tp: float,
         direction = "+" if gain >= 0 else ""
         name = r["name"][:55]
 
-        sys.stdout.write(f"  [{i:>2}/{len(results)}] {name:<57} {r['input_i']:>+6.1f} -> {target_lufs:>+6.1f}  ({direction}{gain:.1f} LU) ")
+        sys.stdout.write(
+            f"  [{i:>2}/{len(results)}] {name:<57} {r['input_i']:>+6.1f} -> {target_lufs:>+6.1f}  ({direction}{gain:.1f} LU) ")
         sys.stdout.flush()
 
-        success = normalize_song(r, target_lufs, target_tp, target_lra, output_dir)
+        success = normalize_song(
+            r, target_lufs, target_tp, target_lra, output_dir)
         if success:
             print(" ok")
             ok += 1
         else:
             print(" FAILED")
 
-    print(f"\n  Done! {ok}/{len(results)} songs normalized to {target_lufs:+.1f} LUFS")
+    print(
+        f"\n  Done! {ok}/{len(results)} songs normalized to {target_lufs:+.1f} LUFS")
     print(f"  Output: {output_dir}")
     print("=" * 110 + "\n")
 

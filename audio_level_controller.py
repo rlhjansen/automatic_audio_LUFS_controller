@@ -78,7 +78,7 @@ if sys.stderr is None:
 CONFIG_PATH = Path.home() / ".audio_level_controller.json"
 
 DEFAULTS = {
-    "target_lufs":   -26.0,
+    "target_lufs": -26.0,
     "enabled":       True,
     "window_seconds": 10.0,
     "slew_rate":      8.0,     # dB / s
@@ -120,7 +120,8 @@ def ms_to_lufs(ms: float) -> float:
 
 # ─── Single-instance guard (PID file) ───────────────────────────────────────
 
-_PID_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "AudioLevelController" / "controller.pid"
+_PID_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home())) / \
+    "AudioLevelController" / "controller.pid"
 
 
 def acquire_single_instance() -> bool:
@@ -163,14 +164,14 @@ class AudioLevelController:
     """
 
     def __init__(self, cfg: dict):
-        self.target_lufs    = cfg["target_lufs"]
-        self.enabled        = cfg["enabled"]
-        self.window_s       = cfg["window_seconds"]
-        self.slew_rate      = cfg["slew_rate"]
-        self.hold_time      = cfg["hold_time"]
+        self.target_lufs = cfg["target_lufs"]
+        self.enabled = cfg["enabled"]
+        self.window_s = cfg["window_seconds"]
+        self.slew_rate = cfg["slew_rate"]
+        self.hold_time = cfg["hold_time"]
         self.manual_pause_s = cfg["manual_pause"]
 
-        self.block_ms    = 200          # capture block duration
+        self.block_ms = 200          # capture block duration
         self.sample_rate = 48000
         self.silence_thr = -50.0
 
@@ -178,26 +179,27 @@ class AudioLevelController:
         self._ms_buf = deque(maxlen=max_blocks)
 
         # Observable state (read by tray / console)
-        self.source_lufs    = -100.0
+        self.source_lufs = -100.0
         self.current_vol_db = 0.0
         self.desired_vol_db = 0.0
-        self.is_silent      = True
-        self.vol_range      = (-65.25, 0.0, 0.5)
-        self.running        = False
-        self.speaker_name   = ""
+        self.is_silent = True
+        self.vol_range = (-65.25, 0.0, 0.5)
+        self.running = False
+        self.speaker_name = ""
         self.manual_override_until = 0.0
 
         # Internal
-        self._lock          = threading.Lock()
-        self._last_set_db   = None
+        self._lock = threading.Lock()
+        self._last_set_db = None
         self._last_set_time = 0.0
-        self._hold_counter  = 0.0
+        self._hold_counter = 0.0
 
     # ── public API (thread-safe) ──
 
     def adjust_target(self, delta_db: float):
         with self._lock:
-            self.target_lufs = max(-60.0, min(0.0, self.target_lufs + delta_db))
+            self.target_lufs = max(-60.0,
+                                   min(0.0, self.target_lufs + delta_db))
         cfg = load_config()
         cfg["target_lufs"] = self.target_lufs
         save_config(cfg)
@@ -338,10 +340,10 @@ class AudioLevelController:
                 continue
 
             with self._lock:
-                L       = self.source_lufs
-                target  = self.target_lufs
+                L = self.source_lufs
+                target = self.target_lufs
                 enabled = self.enabled
-                silent  = self.is_silent
+                silent = self.is_silent
 
             if not enabled or silent:
                 self.current_vol_db = actual_db
@@ -460,7 +462,7 @@ def run_tray(ctrl: AudioLevelController):
             row=0, column=0, padx=(12, 4), pady=(12, 0), sticky="w")
 
         slider_var = tk.DoubleVar(value=ctrl.target_lufs)
-        entry_var  = tk.StringVar(value=f"{ctrl.target_lufs:.1f}")
+        entry_var = tk.StringVar(value=f"{ctrl.target_lufs:.1f}")
 
         def on_slider(val):
             v = float(val)
@@ -482,7 +484,8 @@ def run_tray(ctrl: AudioLevelController):
                           showvalue=False)
         slider.grid(row=0, column=1, padx=4, pady=(12, 0))
 
-        entry = tk.Entry(win, textvariable=entry_var, width=7, justify="center")
+        entry = tk.Entry(win, textvariable=entry_var,
+                         width=7, justify="center")
         entry.grid(row=0, column=2, padx=(4, 12), pady=(12, 0))
         entry.bind("<Return>", on_entry)
         entry.bind("<FocusOut>", on_entry)
@@ -492,7 +495,7 @@ def run_tray(ctrl: AudioLevelController):
             row=1, column=0, padx=(12, 4), pady=(8, 0), sticky="w")
 
         win_slider_var = tk.DoubleVar(value=ctrl.window_s)
-        win_entry_var  = tk.StringVar(value=f"{ctrl.window_s:.0f}")
+        win_entry_var = tk.StringVar(value=f"{ctrl.window_s:.0f}")
 
         def on_win_slider(val):
             v = float(val)
@@ -546,7 +549,8 @@ def run_tray(ctrl: AudioLevelController):
             if ctrl.is_silent:
                 status_var.set("Silent")
             else:
-                status_var.set(f"Src: {L:+.0f}  Vol: {V:+.0f} dB  Target: {T:+.0f}")
+                status_var.set(
+                    f"Src: {L:+.0f}  Vol: {V:+.0f} dB  Target: {T:+.0f}")
             # Also sync sliders if changed externally
             if abs(slider_var.get() - T) > 0.1:
                 slider_var.set(T)
@@ -581,8 +585,10 @@ def run_tray(ctrl: AudioLevelController):
     def on_quit(icon, item):
         ctrl.stop()
         if _settings_win is not None:
-            try: _settings_win.destroy()
-            except Exception: pass
+            try:
+                _settings_win.destroy()
+            except Exception:
+                pass
         icon.stop()
 
     def status_text(item):
@@ -644,7 +650,7 @@ def run_console(ctrl: AudioLevelController):
             T = ctrl.target_lufs
             H = L + V
             en = "ON " if ctrl.enabled else "OFF"
-            s  = "SIL" if ctrl.is_silent else "   "
+            s = "SIL" if ctrl.is_silent else "   "
             mo = "HOLD" if time.monotonic() < ctrl.manual_override_until else "    "
             print(
                 f"\r  [{en}] Src:{L:>+6.1f}  Vol:{V:>+6.1f}dB  "
@@ -815,7 +821,8 @@ def main():
         try:
             run_tray(ctrl)
         except ImportError as e:
-            print(f"  pystray/Pillow not available ({e}), falling back to console")
+            print(
+                f"  pystray/Pillow not available ({e}), falling back to console")
             run_console(ctrl)
 
 

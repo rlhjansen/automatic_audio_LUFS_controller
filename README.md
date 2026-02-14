@@ -86,7 +86,7 @@ python audio_level_controller.py --console
 
 Shows a single-line live readout for debugging:
 ```
-[ON ] Src: -18.3  Vol:  -7.7dB  Heard: -26.0  T:  -26  
+[ON ] Src: -18.3  Vol:  -7.7dB  Heard: -26.0  T:  -26
 ```
 
 ### Set target from CLI
