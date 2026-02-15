@@ -1,5 +1,6 @@
 numpy
 soundcard
-pulsectl
+pycaw
+comtypes
 pystray
 Pillow

@@ -1,7 +1,7 @@
 """
-Audio Level Analysis & Normalization (EBU R128 / LUFS)  —  Linux version
-=========================================================================
-Analyses volume levels of all audio files in the target directory using
+Audio Level Analysis & Normalization (EBU R128 / LUFS)
+=======================================================
+Analyses volume levels of all MP3 files in the current directory using
 ffmpeg's loudnorm filter (EBU R128 standard), then normalizes them to a
 consistent target loudness so there are no jarring jumps between songs.
 
@@ -19,30 +19,20 @@ import subprocess
 import sys
 from pathlib import Path
 
-# ─── Locate ffmpeg ───────────────────────────────────────────────────────────
-# Prefer system ffmpeg on Linux; fall back to imageio_ffmpeg bundle if needed.
+# ─── Locate the bundled ffmpeg binary ────────────────────────────────────────
 
-import shutil
-
-FFMPEG = shutil.which("ffmpeg")
-if not FFMPEG:
-    try:
-        import imageio_ffmpeg
-        FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
-    except ImportError:
-        print("  ERROR: ffmpeg not found. Install it with:")
-        print("    sudo apt install ffmpeg")
-        sys.exit(1)
+import imageio_ffmpeg
+FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-AUDIO_DIR = Path.home() / "Music"
+AUDIO_DIR = Path(r"F:\\")
 OUTPUT_DIR = AUDIO_DIR / "normalized"
 # Integrated loudness target (Spotify uses -14, YouTube -14)
 TARGET_LUFS = -14.0
 TARGET_TP = -1.0    # True peak ceiling in dBTP
 TARGET_LRA = 11.0    # Loudness range target
-EXTENSIONS = {".mp3", ".flac", ".ogg", ".opus", ".wav", ".m4a", ".aac"}
+EXTENSIONS = {".mp3"}
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -168,9 +158,9 @@ def print_analysis(results: list[dict], target: float) -> None:
     print(f"    Target:          {target:+.1f} LUFS")
     print(f"    Songs analysed:  {len(results)}")
     print()
-    print("  Legend:  ▲ = louder than target (will be turned down)")
-    print("           ▼ = quieter than target (will be turned up)")
-    print("           ≈ = already close to target (within ±1 LU)")
+    print("  Legend:  ^ = louder than target (will be turned down)")
+    print("           v = quieter than target (will be turned up)")
+    print("           ~ = already close to target (within +/-1 LU)")
     print()
 
 

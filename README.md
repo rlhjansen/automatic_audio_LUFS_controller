@@ -1,8 +1,10 @@
 # Real-Time Audio Level Controller
 
-A Windows system-tray application that monitors system audio via WASAPI loopback and automatically adjusts the master volume to maintain consistent perceived loudness across songs, podcasts, videos, and applications.
+A Linux system-tray application that monitors system audio via PulseAudio / PipeWire monitor sources and automatically adjusts the master volume to maintain consistent perceived loudness across songs, podcasts, videos, and applications.
 
 Think of it as a system-wide loudness normaliser that runs in real time — no need to pre-process files.
+
+> **Note:** The original Windows 10/11 version is preserved as `audio_level_controller_windows10.py` (with `requirements_windows10.txt` and `README_windows10.md`).
 
 ## How it works
 
@@ -10,11 +12,11 @@ Think of it as a system-wide loudness normaliser that runs in real time — no n
 desired_volume_dB = target_LUFS − source_LUFS   (clamped to device range)
 ```
 
-1. **WASAPI loopback capture** reads the system audio mix (pre-volume on most hardware — see [Environment notes](#environment--assumptions) below).
+1. **PulseAudio / PipeWire monitor source** reads the system audio mix (the monitor signal is independent of the volume slider on most setups).
 2. Loudness is integrated over a **configurable sliding window** (default 10 s) of per-block mean-square energy, with silence gating (ITU-R BS.1770-style).
-3. A **feed-forward controller** sets the Windows master volume so that `source + volume ≈ target`. No feedback loop — the loopback signal is independent of the volume slider.
+3. A **feed-forward controller** sets the master volume via `pulsectl` so that `source + volume ≈ target`. No feedback loop — the monitor signal is independent of the volume slider.
 4. **Slew-rate limiting** (8 dB/s) and **hold-before-release** (1.5 s) smooth out transient dips so it doesn't chase every beat.
-5. **Manual override detection** — if you grab the Windows volume slider, the controller pauses for 30 s before resuming.
+5. **Manual override detection** — if you move the volume slider, the controller pauses for 30 s before resuming.
 
 ## Features
 
@@ -26,54 +28,50 @@ desired_volume_dB = target_LUFS − source_LUFS   (clamped to device range)
   - Live status display
 - **Single-instance guard** using a PID file — prevents duplicate launches
 - **Config persistence** to `~/.audio_level_controller.json`
-- **Auto-start installer** (`--install`) — copies everything to `%LOCALAPPDATA%\AudioLevelController\` with a dedicated venv, no USB drive required after installation
+- **XDG autostart installer** (`--install`) — copies everything to `~/.local/share/AudioLevelController/` with a dedicated venv
 - **Console mode** (`--console`) for debugging
 
 ## Installation
 
 ### Prerequisites
 
-- **Windows 10/11** (uses WASAPI and COM APIs)
-- **Python 3.10+** (developed with 3.13.1)
+- **Ubuntu 22.04+** or any Linux with PulseAudio / PipeWire (with PulseAudio compat)
+- **Python 3.10+**
+- **tkinter** (for the settings window)
 - A working audio output device
 
 ### Quick start
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USER/audio-level-controller.git
-cd audio-level-controller
+git clone https://github.com/rlhjansen/automatic_audio_LUFS_controller.git
+cd automatic_audio_LUFS_controller
 
 # Create a virtual environment
-python -m venv .venv
-.venv\Scripts\activate
+python3 -m venv .venv
+source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+# If tkinter is not installed:
+sudo apt install python3-tk
 ```
 
-### soundcard / numpy compatibility patch
+### System dependencies
 
-If you're using **numpy 2.x** (which is the default for Python 3.12+), the `soundcard` package (v0.4.x) will crash with `AttributeError: module 'numpy' has no attribute 'fromstring'`. You need to patch one line in soundcard's `mediafoundation.py`:
+The `soundcard` library requires PulseAudio headers on some systems:
 
+```bash
+sudo apt install libpulse-dev python3-tk ffmpeg
 ```
-# Find the file:
-#   .venv\Lib\site-packages\soundcard\mediafoundation.py
-#
-# Around line 761, change:
-#   numpy.fromstring(_ffi.buffer(...), dtype='float32')
-# To:
-#   numpy.frombuffer(bytes(_ffi.buffer(...)), dtype='float32').copy()
-```
-
-The `--install` command applies this patch automatically.
 
 ## Usage
 
 ### System tray mode (default)
 
 ```bash
-python audio_level_controller.py
+python3 audio_level_controller.py
 ```
 
 Runs as a background app with a system tray icon. Double-click the icon to open Settings, right-click for the quick menu.
@@ -81,7 +79,7 @@ Runs as a background app with a system tray icon. Double-click the icon to open 
 ### Console mode
 
 ```bash
-python audio_level_controller.py --console
+python3 audio_level_controller.py --console
 ```
 
 Shows a single-line live readout for debugging:
@@ -92,29 +90,29 @@ Shows a single-line live readout for debugging:
 ### Set target from CLI
 
 ```bash
-python audio_level_controller.py --target -30
+python3 audio_level_controller.py --target -30
 ```
 
 Saves the target to config and exits.
 
-### Install to Windows startup
+### Install to autostart
 
 ```bash
-python audio_level_controller.py --install
+python3 audio_level_controller.py --install
 ```
 
-Creates a self-contained copy under `%LOCALAPPDATA%\AudioLevelController\` with its own venv and a VBS startup launcher. The controller will auto-start on login — no USB drive or repo checkout needed.
+Creates a self-contained copy under `~/.local/share/AudioLevelController/` with its own venv and an XDG autostart `.desktop` file. The controller will auto-start on login.
 
 ```bash
-python audio_level_controller.py --uninstall
+python3 audio_level_controller.py --uninstall
 ```
 
-Removes the startup entry and installed files.
+Removes the autostart entry and installed files.
 
 ### List audio devices
 
 ```bash
-python audio_level_controller.py --list
+python3 audio_level_controller.py --list
 ```
 
 ## Configuration
@@ -141,55 +139,57 @@ Settings are saved to `~/.audio_level_controller.json` and can be edited by hand
 
 ## Environment & assumptions
 
-This was developed and tested on:
+This Linux version was adapted for and tested on:
 
-- **Windows 11** (should work on Windows 10 as well)
-- **Python 3.13.1** (CPython, 64-bit)
-- **numpy 2.x**, **soundcard 0.4.5**, **pycaw 20240210**, **comtypes**, **pystray**, **Pillow**
+- **Ubuntu 22.04** with **PipeWire** (PulseAudio compatibility layer)
+- **Python 3.10.12**
+- **numpy**, **soundcard 0.4.x**, **pulsectl**, **pystray**, **Pillow**
 
-### Critical assumption: WASAPI loopback is pre-volume
+### Critical assumption: monitor source is pre-volume
 
-On the development machine, WASAPI loopback captures audio **before** the Windows volume slider is applied. This means the captured signal level doesn't change when you move the slider, which is what makes the feed-forward design work.
+On most PulseAudio / PipeWire setups, monitor sources capture audio **before** the sink volume is applied. This means the captured signal level doesn't change when you move the volume slider, which is what makes the feed-forward design work.
 
-**If your system's loopback is post-volume** (i.e. the captured signal *does* change with the slider), the controller will create a feedback loop and will not work correctly. You would need to switch to a PI/PID feedback controller design instead.
+**If your system's monitor source is post-volume** (i.e. the captured signal *does* change with the slider), the controller will create a feedback loop and will not work correctly. You would need to switch to a PI/PID feedback controller design instead.
 
-You can test this by running `--console`, playing audio at a fixed level, and moving the Windows volume slider. If the `Src` reading changes, your loopback is post-volume.
+You can test this by running `--console`, playing audio at a fixed level, and moving the volume slider. If the `Src` reading changes, your monitor is post-volume.
 
-### Windows-only
+### Batch normalization
 
-The controller depends on:
-- **WASAPI** (via `soundcard`) for loopback audio capture
-- **pycaw** / **comtypes** for Windows audio endpoint volume control
-- **COM threading** (`CoInitialize` / `CoUninitialize`)
-- Windows **named Startup folder** for auto-start
+The `audio_level_targeting.py` script scans `~/Music` for audio files (`.mp3`, `.flac`, `.ogg`, `.opus`, `.wav`, `.m4a`, `.aac`) and normalises them using ffmpeg's two-pass loudnorm filter:
 
-Porting to macOS or Linux would require replacing the volume control backend and loopback capture mechanism.
+```bash
+# Make sure ffmpeg is installed
+sudo apt install ffmpeg
 
-### COM threading
+python3 audio_level_targeting.py
+```
 
-All COM-dependent libraries (`comtypes`, `soundcard`, `pycaw`) are imported at **module level** on the main thread. Each worker thread calls `comtypes.CoInitialize()` for its own COM apartment. Importing these inside a thread function causes `UnboundLocalError` due to Python's scoping rules — don't move the imports.
+Normalised files are written to `~/Music/normalized/`.
 
 ## Dependencies
 
 ```
 numpy
 soundcard
-pycaw
-comtypes
+pulsectl
 pystray
 Pillow
 ```
 
-Also uses `tkinter` (bundled with standard Python on Windows).
+Also uses `tkinter` (install with `sudo apt install python3-tk` if needed) and optionally `ffmpeg` (for the batch normalisation script).
 
 ## Repo contents
 
 | File | Description |
 |------|-------------|
-| `audio_level_controller.py` | Main application (single-file) |
-| `audio_level_targeting.py` | Batch offline normalisation script (EBU R128 / LUFS, uses ffmpeg) |
-| `requirements.txt` | Python dependencies |
+| `audio_level_controller.py` | Main application — **Linux** version |
+| `audio_level_targeting.py` | Batch offline normalisation — **Linux** version |
+| `requirements.txt` | Python dependencies (Linux) |
 | `README.md` | This file |
+| `audio_level_controller_windows10.py` | Original Windows 10/11 controller |
+| `audio_level_targeting_windows10.py` | Original Windows batch normalisation |
+| `requirements_windows10.txt` | Python dependencies (Windows) |
+| `README_windows10.md` | Original Windows README |
 
 ## License
 

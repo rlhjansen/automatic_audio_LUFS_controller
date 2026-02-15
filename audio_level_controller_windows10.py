@@ -1,15 +1,14 @@
 """
-Real-Time Audio Level Controller — System Tray Service  (Linux / PulseAudio)
-=============================================================================
-Monitors system audio via a PulseAudio / PipeWire monitor source and adjusts
-the default sink volume to maintain consistent loudness across songs and
-applications.
+Real-Time Audio Level Controller — System Tray Service
+=======================================================
+Monitors system audio via WASAPI loopback and adjusts Windows master volume
+to maintain consistent loudness across songs and applications.
 
 Key design decisions
 --------------------
-* PulseAudio monitor sources capture audio **after** per-stream mixing but
-  the monitor level is independent of the sink (master) volume on most
-  PipeWire / PulseAudio setups.  This allows a pure feed-forward controller:
+* WASAPI loopback on this system is **pre-volume** — the captured signal is
+  independent of the Windows volume slider.  This allows a pure feed-forward
+  controller with no feedback loop:
 
       desired_volume_dB = target_LUFS − source_LUFS   (clamped to [min, 0])
 
@@ -17,9 +16,9 @@ Key design decisions
   mean-square energy (silence-gated).  This avoids reacting to beat-level
   dynamics while still tracking song-to-song level differences.
 
-* The master volume is monitored for **manual changes** — if you move the
-  slider the controller backs off for 30 s (but will still attenuate sudden
-  loud spikes to protect your ears).
+* The Windows volume slider is monitored for **manual changes** — if you
+  grab the slider the controller backs off for 30 s (but will still attenuate
+  sudden loud spikes to protect your ears).
 
 Controls
 --------
@@ -35,19 +34,19 @@ CLI flags
   (default)          Run as system tray app
   --console          Console-only mode (for debugging)
   --target -16       Set target LUFS (saved to config)
-  --install          Add to XDG autostart
-  --uninstall        Remove from XDG autostart
+  --install          Add to Windows startup
+  --uninstall        Remove from Windows startup
   --list             List audio devices
 """
 
 from __future__ import annotations
 
 import argparse
+import ctypes
 import io
 import json
 import math
 import os
-import signal
 import sys
 import threading
 import time
@@ -59,10 +58,15 @@ import warnings
 
 warnings.filterwarnings("ignore", message="data discontinuity")
 
+# Pre-import comtypes and soundcard on the main thread so the module-level
+# CoInitializeEx() runs here once, avoiding COM threading conflicts in worker
+# threads.  Each thread still calls comtypes.CoInitialize() for its own
+# COM apartment.
+import comtypes                         # noqa: E402
 import soundcard as sc                  # noqa: E402
-import pulsectl                         # noqa: E402
+from pycaw.pycaw import AudioUtilities  # noqa: E402
 
-# Handle headless / no-console — redirect streams so prints don't crash
+# Handle pythonw.exe (no console) — redirect streams so prints don't crash
 if sys.stdout is None:
     sys.stdout = io.StringIO()
 if sys.stderr is None:
@@ -114,87 +118,29 @@ def ms_to_lufs(ms: float) -> float:
     return -0.691 + 10.0 * math.log10(ms)
 
 
-# ─── PulseAudio / PipeWire volume helpers ────────────────────────────────────
-
-def _pa_volume_to_db(vol_linear: float) -> float:
-    """Convert PulseAudio linear volume (0.0–1.0+) to dB."""
-    if vol_linear < 1e-10:
-        return -100.0
-    return 20.0 * math.log10(vol_linear)
-
-
-def _db_to_pa_volume(db: float) -> float:
-    """Convert dB to PulseAudio linear volume fraction."""
-    return 10.0 ** (db / 20.0)
-
-
-def _get_default_sink_volume(pulse: pulsectl.Pulse) -> float:
-    """Return current default sink volume in dB."""
-    sink = _get_default_sink(pulse)
-    if sink is None:
-        return 0.0
-    # PulseAudio volumes are per-channel; use the average
-    vol = pulse.volume_get_all_chans(sink)
-    return _pa_volume_to_db(vol)
-
-
-def _set_default_sink_volume(pulse: pulsectl.Pulse, db: float):
-    """Set default sink volume in dB."""
-    sink = _get_default_sink(pulse)
-    if sink is None:
-        return
-    linear = _db_to_pa_volume(db)
-    # Clamp to reasonable range (0 … 1.5 = +3.5 dB headroom)
-    linear = max(0.0, min(1.5, linear))
-    pulse.volume_set_all_chans(sink, linear)
-
-
-def _get_default_sink(pulse: pulsectl.Pulse):
-    """Return the default PulseAudio sink object."""
-    try:
-        info = pulse.server_info()
-        default_name = info.default_sink_name
-        for sink in pulse.sink_list():
-            if sink.name == default_name:
-                return sink
-    except Exception:
-        pass
-    # Fallback: return first sink
-    sinks = pulse.sink_list()
-    return sinks[0] if sinks else None
-
-
-def _get_default_sink_name(pulse: pulsectl.Pulse) -> str:
-    """Return the description of the default sink."""
-    sink = _get_default_sink(pulse)
-    if sink:
-        return sink.description
-    return "(unknown)"
-
-
 # ─── Single-instance guard (PID file) ───────────────────────────────────────
 
-_PID_DIR = Path(os.environ.get("XDG_RUNTIME_DIR",
-                                Path.home() / ".local" / "share")) / \
-    "AudioLevelController"
-_PID_FILE = _PID_DIR / "controller.pid"
+_PID_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home())) / \
+    "AudioLevelController" / "controller.pid"
 
 
 def acquire_single_instance() -> bool:
     """Return True if we are the only instance (or prior one is dead)."""
-    _PID_DIR.mkdir(parents=True, exist_ok=True)
+    _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     if _PID_FILE.exists():
         try:
             old_pid = int(_PID_FILE.read_text().strip())
             # Check if that PID is still alive
-            os.kill(old_pid, 0)        # signal 0 = existence check
-            return False               # another instance is genuinely running
-        except ProcessLookupError:
-            pass                       # PID gone → stale file, take over
-        except PermissionError:
-            return False               # process exists but owned by other user
+            import ctypes as _ct
+            kernel32 = _ct.windll.kernel32
+            PROCESS_QUERY_LIMITED = 0x1000
+            h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED, False, old_pid)
+            if h:
+                kernel32.CloseHandle(h)
+                return False          # another instance is genuinely running
+            # PID gone → stale file, we can take over
         except Exception:
-            pass                       # corrupt file, ignore
+            pass                      # corrupt file, ignore
     _PID_FILE.write_text(str(os.getpid()))
     return True
 
@@ -211,16 +157,11 @@ def release_single_instance():
 
 class AudioLevelController:
     """
-    Feed-forward volume controller  (Linux / PulseAudio / PipeWire).
+    Feed-forward volume controller.
 
-    * Capture thread  — PulseAudio monitor source → 10 s sliding window of
-      mean-square values.
-    * Control thread  — feed-forward volume adjustment via pulsectl.
+    * Capture thread  — WASAPI loopback → 10 s sliding window of mean-square
+    * Control thread  — feed-forward volume adjustment via pycaw
     """
-
-    # Volume range in dB (PulseAudio: 0.0 linear = −∞ dB, 1.0 = 0 dB)
-    MIN_VOL_DB = -60.0
-    MAX_VOL_DB = 3.5        # ~1.5 linear, small headroom
 
     def __init__(self, cfg: dict):
         self.target_lufs = cfg["target_lufs"]
@@ -235,21 +176,21 @@ class AudioLevelController:
         self.silence_thr = -50.0
 
         max_blocks = max(1, int(self.window_s / (self.block_ms / 1000)))
-        self._ms_buf: deque[float] = deque(maxlen=max_blocks)
+        self._ms_buf = deque(maxlen=max_blocks)
 
         # Observable state (read by tray / console)
         self.source_lufs = -100.0
         self.current_vol_db = 0.0
         self.desired_vol_db = 0.0
         self.is_silent = True
-        self.vol_range = (self.MIN_VOL_DB, self.MAX_VOL_DB, 0.5)
+        self.vol_range = (-65.25, 0.0, 0.5)
         self.running = False
         self.speaker_name = ""
         self.manual_override_until = 0.0
 
         # Internal
         self._lock = threading.Lock()
-        self._last_set_db: float | None = None
+        self._last_set_db = None
         self._last_set_time = 0.0
         self._hold_counter = 0.0
 
@@ -275,6 +216,7 @@ class AudioLevelController:
         with self._lock:
             self.window_s = seconds
             max_blocks = max(1, int(self.window_s / (self.block_ms / 1000)))
+            # Copy existing data into a new deque with the new maxlen
             old = list(self._ms_buf)
             self._ms_buf = deque(old[-max_blocks:], maxlen=max_blocks)
         cfg = load_config()
@@ -307,15 +249,17 @@ class AudioLevelController:
     # ── capture thread ──
 
     def _capture_thread(self):
-        """PulseAudio monitor source → sliding-window mean-square buffer."""
+        """WASAPI loopback → sliding-window mean-square buffer."""
+        try:
+            comtypes.CoInitialize()
+        except OSError:
+            pass
+
         while self.running:
             try:
                 speaker = sc.default_speaker()
                 self.speaker_name = speaker.name
-                # On PulseAudio/PipeWire the monitor source ID is the
-                # sink ID with ".monitor" appended.
-                monitor_id = speaker.id + ".monitor"
-                loopback = sc.get_microphone(monitor_id,
+                loopback = sc.get_microphone(speaker.id,
                                              include_loopback=True)
                 block_n = int(self.sample_rate * self.block_ms / 1000)
 
@@ -346,94 +290,109 @@ class AudioLevelController:
     # ── control thread ──
 
     def _control_thread(self):
-        """Feed-forward volume adjustment via pulsectl."""
-        min_db, max_db = self.MIN_VOL_DB, self.MAX_VOL_DB
+        """Feed-forward volume adjustment via pycaw."""
+        try:
+            comtypes.CoInitialize()
+        except OSError:
+            pass
 
-        # Each thread gets its own pulsectl connection
-        with pulsectl.Pulse("audio-level-ctrl") as pulse:
+        speakers = AudioUtilities.GetSpeakers()
+        vol_ep = speakers.EndpointVolume
+
+        try:
+            rng = vol_ep.GetVolumeRange()
+            self.vol_range = (rng[0], rng[1], rng[2])
+        except Exception:
+            pass
+        min_db, max_db, _ = self.vol_range
+
+        try:
+            self.current_vol_db = vol_ep.GetMasterVolumeLevel()
+        except Exception:
+            self.current_vol_db = 0.0
+        self.desired_vol_db = self.current_vol_db
+        self._last_set_db = self.current_vol_db
+        self._last_set_time = time.monotonic()
+
+        dt = self.block_ms / 1000.0
+        last_time = time.monotonic()
+
+        while self.running:
+            time.sleep(dt * 0.5)
+            now = time.monotonic()
+            actual_dt = now - last_time
+            last_time = now
+
+            # ── read actual volume ──
             try:
-                self.current_vol_db = _get_default_sink_volume(pulse)
+                actual_db = vol_ep.GetMasterVolumeLevel()
             except Exception:
-                self.current_vol_db = 0.0
+                continue
 
-            self.desired_vol_db = self.current_vol_db
-            self._last_set_db = self.current_vol_db
-            self._last_set_time = time.monotonic()
+            # ── detect manual change ──
+            if (self._last_set_db is not None
+                    and now - self._last_set_time > 0.3
+                    and abs(actual_db - self._last_set_db) > 1.5):
+                self.manual_override_until = now + self.manual_pause_s
+                self.current_vol_db = actual_db
+                self._last_set_db = actual_db
+                self._last_set_time = now
+                continue
 
-            dt = self.block_ms / 1000.0
-            last_time = time.monotonic()
+            with self._lock:
+                L = self.source_lufs
+                target = self.target_lufs
+                enabled = self.enabled
+                silent = self.is_silent
 
-            while self.running:
-                time.sleep(dt * 0.5)
-                now = time.monotonic()
-                actual_dt = now - last_time
-                last_time = now
+            if not enabled or silent:
+                self.current_vol_db = actual_db
+                self._last_set_db = actual_db
+                self._last_set_time = now
+                self._hold_counter = self.hold_time
+                continue
 
-                # ── read actual volume ──
-                try:
-                    actual_db = _get_default_sink_volume(pulse)
-                except Exception:
-                    continue
+            # ── feed-forward ──
+            raw_desired = target - L
+            raw_desired = max(min_db, min(max_db, raw_desired))
 
-                # ── detect manual change ──
-                if (self._last_set_db is not None
-                        and now - self._last_set_time > 0.3
-                        and abs(actual_db - self._last_set_db) > 1.5):
-                    self.manual_override_until = now + self.manual_pause_s
-                    self.current_vol_db = actual_db
-                    self._last_set_db = actual_db
-                    self._last_set_time = now
-                    continue
-
-                with self._lock:
-                    L = self.source_lufs
-                    target = self.target_lufs
-                    enabled = self.enabled
-                    silent = self.is_silent
-
-                if not enabled or silent:
-                    self.current_vol_db = actual_db
-                    self._last_set_db = actual_db
-                    self._last_set_time = now
-                    self._hold_counter = self.hold_time
-                    continue
-
-                # ── feed-forward ──
-                raw_desired = target - L
-                raw_desired = max(min_db, min(max_db, raw_desired))
-
-                # Hold before releasing (don't raise vol on transient dips)
-                if raw_desired > self.desired_vol_db + 0.5:
-                    if self._hold_counter > 0:
-                        self._hold_counter -= actual_dt
-                    else:
-                        self.desired_vol_db = raw_desired
-                        self._hold_counter = self.hold_time
+            # Hold before releasing (don't raise vol on transient dips)
+            if raw_desired > self.desired_vol_db + 0.5:
+                if self._hold_counter > 0:
+                    self._hold_counter -= actual_dt
                 else:
                     self.desired_vol_db = raw_desired
                     self._hold_counter = self.hold_time
+            else:
+                self.desired_vol_db = raw_desired
+                self._hold_counter = self.hold_time
 
-                # ── manual override: allow attenuation, block increase ──
-                in_manual = now < self.manual_override_until
-                if in_manual and self.desired_vol_db > self.current_vol_db + 0.5:
-                    continue
+            # ── manual override: allow attenuation, block increase ──
+            in_manual = now < self.manual_override_until
+            if in_manual and self.desired_vol_db > self.current_vol_db + 0.5:
+                continue
 
-                # ── slew-rate limited transition ──
-                delta = self.desired_vol_db - self.current_vol_db
-                max_step = self.slew_rate * actual_dt
-                if abs(delta) > max_step:
-                    delta = max_step if delta > 0 else -max_step
+            # ── slew-rate limited transition ──
+            delta = self.desired_vol_db - self.current_vol_db
+            max_step = self.slew_rate * actual_dt
+            if abs(delta) > max_step:
+                delta = max_step if delta > 0 else -max_step
 
-                new_db = max(min_db, min(max_db, self.current_vol_db + delta))
+            new_db = max(min_db, min(max_db, self.current_vol_db + delta))
 
-                if abs(new_db - self.current_vol_db) > 0.1:
-                    try:
-                        _set_default_sink_volume(pulse, new_db)
-                        self.current_vol_db = new_db
-                        self._last_set_db = new_db
-                        self._last_set_time = now
-                    except Exception:
-                        pass
+            if abs(new_db - self.current_vol_db) > 0.1:
+                try:
+                    vol_ep.SetMasterVolumeLevel(float(new_db), None)
+                    self.current_vol_db = new_db
+                    self._last_set_db = new_db
+                    self._last_set_time = now
+                except Exception:
+                    pass
+
+        try:
+            comtypes.CoUninitialize()
+        except Exception:
+            pass
 
 
 # ─── System Tray ─────────────────────────────────────────────────────────────
@@ -480,6 +439,7 @@ def run_tray(ctrl: AudioLevelController):
 
     def _show_settings_window():
         nonlocal _settings_win
+        # If window already open, just bring it to front
         if _settings_win is not None:
             try:
                 _settings_win.lift()
@@ -576,7 +536,7 @@ def run_tray(ctrl: AudioLevelController):
         # ── Status label (live) ──
         status_var = tk.StringVar(value="")
         status_lbl = tk.Label(win, textvariable=status_var, fg="#555555",
-                              font=("monospace", 9))
+                              font=("Consolas", 9))
         status_lbl.grid(row=3, column=0, columnspan=3, padx=12, pady=(0, 8),
                         sticky="w")
 
@@ -591,6 +551,7 @@ def run_tray(ctrl: AudioLevelController):
             else:
                 status_var.set(
                     f"Src: {L:+.0f}  Vol: {V:+.0f} dB  Target: {T:+.0f}")
+            # Also sync sliders if changed externally
             if abs(slider_var.get() - T) > 0.1:
                 slider_var.set(T)
                 entry_var.set(f"{T:.1f}")
@@ -636,6 +597,9 @@ def run_tray(ctrl: AudioLevelController):
             return f"DISABLED | Target: {T:+.0f} LUFS"
         if ctrl.is_silent:
             return f"Silent | Target: {T:+.0f} LUFS"
+        err = T - L
+        if err > 0.5 and ctrl.desired_vol_db >= ctrl.vol_range[1] - 0.5:
+            return f"Src: {L:+.0f} | Vol: {V:+.0f} dB | AT MAX"
         return f"Src: {L:+.0f} | Vol: {V:+.0f} dB | Target: {T:+.0f}"
 
     def is_enabled(item):
@@ -700,18 +664,20 @@ def run_console(ctrl: AudioLevelController):
     print("\n  Stopped.")
 
 
-# ─── Auto-Start (XDG Autostart) ─────────────────────────────────────────────
+# ─── Auto-Start ─────────────────────────────────────────────────────────────
 
-AUTOSTART_DIR = Path.home() / ".config" / "autostart"
-INSTALL_DIR = Path.home() / ".local" / "share" / "AudioLevelController"
-DESKTOP_NAME = "audio-level-controller.desktop"
+STARTUP_DIR = Path(os.environ.get("APPDATA", "")) / (
+    r"Microsoft\Windows\Start Menu\Programs\Startup"
+)
+INSTALL_DIR = Path(os.environ.get("LOCALAPPDATA", "")) / "AudioLevelController"
+VBS_NAME = "AudioLevelController.vbs"
 
 
 def install_startup():
-    """Create a self-contained install under ~/.local/share and XDG autostart.
+    """Create a self-contained install under %LOCALAPPDATA% with its own venv.
 
     Copies the script, creates a dedicated venv, installs dependencies, and
-    writes a .desktop autostart entry.
+    writes a startup VBS.  No USB drive required after installation.
     """
     import shutil
     import subprocess as sp
@@ -722,67 +688,80 @@ def install_startup():
     shutil.copy2(src, dst)
     print(f"  [1/4] Copied script to {dst}")
 
-    # Find system Python
-    system_python = shutil.which("python3") or shutil.which("python")
-    if not system_python:
-        print("  ERROR: Cannot find python3 on PATH")
+    # Find system Python (not the venv python)
+    system_python = Path(r"C:\Python313\python.exe")
+    if not system_python.exists():
+        # Try to find python on PATH
+        result = sp.run(["where", "python"], capture_output=True, text=True)
+        for line in result.stdout.strip().splitlines():
+            p = Path(line.strip())
+            if p.exists() and "venv" not in str(p).lower():
+                system_python = p
+                break
+    if not system_python.exists():
+        print(f"  ERROR: Cannot find system Python at {system_python}")
+        print(f"  Install Python system-wide or adjust the path.")
         return
-    system_python = Path(system_python).resolve()
 
     # Create local venv
     venv_dir = INSTALL_DIR / ".venv"
-    venv_python = venv_dir / "bin" / "python3"
-    if not venv_python.exists():
+    if not (venv_dir / "Scripts" / "python.exe").exists():
         print(f"  [2/4] Creating venv at {venv_dir} ...")
         sp.run([str(system_python), "-m", "venv", str(venv_dir)], check=True)
     else:
         print(f"  [2/4] Venv already exists at {venv_dir}")
 
     # Install dependencies
-    pip = venv_dir / "bin" / "pip"
-    deps = ["numpy", "soundcard", "pulsectl", "pystray", "Pillow"]
+    pip = venv_dir / "Scripts" / "pip.exe"
+    deps = ["numpy", "soundcard", "pycaw", "comtypes", "pystray", "Pillow"]
     print(f"  [3/4] Installing dependencies: {', '.join(deps)} ...")
     sp.run(
         [str(pip), "install", "--quiet", "--upgrade"] + deps,
         check=True,
     )
 
-    # Write XDG autostart .desktop file
-    AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
-    desktop_content = f"""[Desktop Entry]
-Type=Application
-Name=Audio Level Controller
-Comment=Real-time LUFS-based volume normaliser
-Exec={venv_python} {dst}
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-StartupNotify=false
-Terminal=false
-"""
-    desktop_path = AUTOSTART_DIR / DESKTOP_NAME
-    desktop_path.write_text(desktop_content)
-    print(f"  [4/4] Created autostart entry")
+    # Patch soundcard's numpy.fromstring bug if needed (numpy 2.x removed it)
+    mf = venv_dir / "Lib" / "site-packages" / "soundcard" / "mediafoundation.py"
+    if mf.exists():
+        txt = mf.read_text()
+        if "numpy.fromstring" in txt:
+            # Only patch the ONE line that uses fromstring on audio data
+            old = "numpy.fromstring(_ffi.buffer(data_ptr, nframes*4*len(set(self.channelmap))), dtype='float32')"
+            new = "numpy.frombuffer(bytes(_ffi.buffer(data_ptr, nframes*4*len(set(self.channelmap)))), dtype='float32').copy()"
+            if old in txt:
+                txt = txt.replace(old, new)
+                mf.write_text(txt)
+                print("    Patched soundcard/mediafoundation.py (numpy compat)")
+
+    # Write VBS startup launcher
+    pythonw = venv_dir / "Scripts" / "pythonw.exe"
+    vbs = (
+        'Set s = CreateObject("WScript.Shell")\n'
+        f's.Run """{pythonw}"" ""{dst}""", 0, False\n'
+    )
+    vbs_path = STARTUP_DIR / VBS_NAME
+    vbs_path.write_text(vbs)
+    print(f"  [4/4] Created startup launcher")
 
     print()
     print(f"  Installation complete!")
-    print(f"    Script:    {dst}")
-    print(f"    Venv:      {venv_dir}")
-    print(f"    Autostart: {desktop_path}")
-    print(f"    Python:    {venv_python}")
+    print(f"    Script:  {dst}")
+    print(f"    Venv:    {venv_dir}")
+    print(f"    Startup: {vbs_path}")
+    print(f"    Python:  {pythonw}")
     print()
     print(f"  The controller will auto-start on login.")
-    print(f"  Re-run --install to update.")
+    print(f"  No USB drive needed.  Re-run --install to update.")
 
 
 def uninstall_startup():
     import shutil
-    desktop_path = AUTOSTART_DIR / DESKTOP_NAME
-    if desktop_path.exists():
-        desktop_path.unlink()
-        print(f"  Removed: {desktop_path}")
+    vbs_path = STARTUP_DIR / VBS_NAME
+    if vbs_path.exists():
+        vbs_path.unlink()
+        print(f"  Removed: {vbs_path}")
     else:
-        print(f"  Not found: {desktop_path}")
+        print(f"  Not found: {vbs_path}")
     if INSTALL_DIR.exists():
         shutil.rmtree(INSTALL_DIR, ignore_errors=True)
         print(f"  Removed: {INSTALL_DIR}")
@@ -792,16 +771,16 @@ def uninstall_startup():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Real-time audio level controller (Linux)"
+        description="Real-time audio level controller"
     )
     parser.add_argument("--target", type=float,
                         help="Set target LUFS (saved to config)")
     parser.add_argument("--console", action="store_true",
                         help="Console mode instead of system tray")
     parser.add_argument("--install", action="store_true",
-                        help="Install to XDG autostart")
+                        help="Install to Windows startup")
     parser.add_argument("--uninstall", action="store_true",
-                        help="Remove from XDG autostart")
+                        help="Remove from Windows startup")
     parser.add_argument("--list", action="store_true",
                         help="List audio devices")
     args = parser.parse_args()
@@ -827,12 +806,6 @@ def main():
 
     import atexit
     atexit.register(release_single_instance)
-
-    # Handle SIGTERM gracefully (e.g. from systemd or kill)
-    def _sigterm(signum, frame):
-        release_single_instance()
-        sys.exit(0)
-    signal.signal(signal.SIGTERM, _sigterm)
 
     cfg = load_config()
     if args.target is not None:
