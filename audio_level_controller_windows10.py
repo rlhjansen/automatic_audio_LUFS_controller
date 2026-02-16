@@ -118,39 +118,55 @@ def ms_to_lufs(ms: float) -> float:
     return -0.691 + 10.0 * math.log10(ms)
 
 
-# ─── Single-instance guard (PID file) ───────────────────────────────────────
+# ─── Single-instance guard (Named Mutex) ────────────────────────────────────
+# A Windows named mutex is automatically released by the kernel when the
+# owning process exits — even on crash or reboot — so there is no stale-
+# lock problem like there was with the old PID-file approach.
 
-_PID_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home())) / \
+_mutex_handle = None
+
+# Legacy PID file path (clean up from previous versions)
+_LEGACY_PID = Path(os.environ.get("LOCALAPPDATA", Path.home())) / \
     "AudioLevelController" / "controller.pid"
 
 
 def acquire_single_instance() -> bool:
-    """Return True if we are the only instance (or prior one is dead)."""
-    _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if _PID_FILE.exists():
-        try:
-            old_pid = int(_PID_FILE.read_text().strip())
-            # Check if that PID is still alive
-            import ctypes as _ct
-            kernel32 = _ct.windll.kernel32
-            PROCESS_QUERY_LIMITED = 0x1000
-            h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED, False, old_pid)
-            if h:
-                kernel32.CloseHandle(h)
-                return False          # another instance is genuinely running
-            # PID gone → stale file, we can take over
-        except Exception:
-            pass                      # corrupt file, ignore
-    _PID_FILE.write_text(str(os.getpid()))
+    """Return True if we are the only instance, using a Windows named mutex."""
+    global _mutex_handle
+
+    # Remove stale PID file left by an older version of this script
+    try:
+        if _LEGACY_PID.exists():
+            _LEGACY_PID.unlink()
+    except Exception:
+        pass
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ERROR_ALREADY_EXISTS = 183
+
+    _mutex_handle = kernel32.CreateMutexW(None, True,
+                                          "Global\\AudioLevelController_SingleInstance")
+    if not _mutex_handle:
+        return False                  # CreateMutex failed entirely
+
+    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(_mutex_handle)
+        _mutex_handle = None
+        return False                  # another instance is genuinely running
+
     return True
 
 
 def release_single_instance():
-    try:
-        if _PID_FILE.exists() and _PID_FILE.read_text().strip() == str(os.getpid()):
-            _PID_FILE.unlink()
-    except Exception:
-        pass
+    global _mutex_handle
+    if _mutex_handle:
+        try:
+            kernel32 = ctypes.windll.kernel32
+            kernel32.ReleaseMutex(_mutex_handle)
+            kernel32.CloseHandle(_mutex_handle)
+        except Exception:
+            pass
+        _mutex_handle = None
 
 
 # ─── Core Controller ────────────────────────────────────────────────────────
@@ -787,7 +803,7 @@ def main():
 
     if args.install:
         install_startup()
-        return
+        # Fall through to launch in tray mode after installing
 
     if args.uninstall:
         uninstall_startup()
