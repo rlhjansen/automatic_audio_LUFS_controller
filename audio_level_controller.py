@@ -175,7 +175,7 @@ def _get_default_sink_name(pulse: pulsectl.Pulse) -> str:
 # ─── Single-instance guard (PID file) ───────────────────────────────────────
 
 _PID_DIR = Path(os.environ.get("XDG_RUNTIME_DIR",
-                                Path.home() / ".local" / "share")) / \
+                               Path.home() / ".local" / "share")) / \
     "AudioLevelController"
 _PID_FILE = _PID_DIR / "controller.pid"
 
@@ -808,7 +808,7 @@ def main():
 
     if args.install:
         install_startup()
-        return
+        # Fall through to launch in tray mode after installing
 
     if args.uninstall:
         uninstall_startup()
